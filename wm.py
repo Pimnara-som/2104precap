@@ -5,6 +5,7 @@ import hashlib
 import os
 import numpy as np
 import base64 
+import pywt  # เพิ่มไลบรารี PyWavelets สำหรับทำ DWT
 
 # ตั้งค่า Theme ของ UI
 ctk.set_appearance_mode("Dark")  
@@ -14,7 +15,7 @@ class WatermarkApp(ctk.CTk):
     def __init__(self):
         super().__init__()
 
-        self.title("Evidence Watermarking System (Fragile / Destructive)")
+        self.title("Evidence Watermarking System (DWT Domain / Fragile)")
         self.geometry("900x650")
         self.resizable(False, False)
 
@@ -52,7 +53,7 @@ class WatermarkApp(ctk.CTk):
         self.lbl_embed_file = ctk.CTkLabel(self.left_frame, text="ยังไม่ได้เลือกรูปภาพ", text_color="gray", font=("Arial", 12))
         self.lbl_embed_file.pack(pady=(0, 10))
 
-        self.btn_embed = ctk.CTkButton(self.left_frame, text="เริ่มฝังลายน้ำ (Invisible)", fg_color="#28a745", hover_color="#218838", command=self.embed_watermark)
+        self.btn_embed = ctk.CTkButton(self.left_frame, text="แยก DWT & เริ่มฝังลายน้ำ", fg_color="#28a745", hover_color="#218838", command=self.embed_watermark)
         self.btn_embed.pack(pady=(0, 20), padx=20, fill="x")
 
         ctk.CTkLabel(self.left_frame, text="--- โหมดถอดลายน้ำ ---", text_color="#dc3545").pack(pady=(10, 5))
@@ -112,6 +113,48 @@ class WatermarkApp(ctk.CTk):
             if len(filename) > 30: filename = filename[:27] + "..."
             self.lbl_extract_file.configure(text=filename, text_color="white")
 
+    # ================= ฟังก์ชันใหม่: แสดงผล DWT Bands =================
+    def show_dwt_visualization(self, pil_img, levels=2):
+        # 1. แปลงภาพเป็น Grayscale สำหรับคำนวณ Wavelet
+        img_gray = pil_img.convert('L')
+        arr = np.float32(img_gray)
+        
+        # 2. ทำ 2D Discrete Wavelet Transform
+        # ใช้ 'haar' wavelet ซึ่งเป็นที่นิยมที่สุดสำหรับการทำ Image Processing พื้นฐาน
+        coeffs = pywt.wavedec2(arr, 'haar', level=levels)
+        
+        # 3. จัดเรียงข้อมูล Coefficients กลับมาเป็น Array เดียว (เพื่อให้วาดเป็นรูป 4 ช่องได้)
+        arr_dwt, slices = pywt.coeffs_to_array(coeffs)
+        
+        # 4. ปรับค่าเพื่อการแสดงผล (Visualization)
+        # เนื่องจาก High Frequency Bands (พวกเส้นขอบ) จะมีค่าเข้าใกล้ 0 (มืดมาก) 
+        # เราจึงใช้ Power Law (หรือ log) เพื่อดึงความสว่างให้เห็นเส้นขอบชัดๆ
+        arr_dwt_abs = np.abs(arr_dwt)
+        arr_dwt_vis = np.power(arr_dwt_abs, 0.5) 
+        arr_dwt_norm = np.uint8(255 * (arr_dwt_vis / np.max(arr_dwt_vis)))
+        
+        vis_img = Image.fromarray(arr_dwt_norm)
+        
+        # 5. สร้างหน้าต่าง TopLevel เพื่อโชว์ภาพ DWT
+        top = ctk.CTkToplevel(self)
+        top.title(f"DWT Wavelet Decomposition (Level {levels})")
+        top.geometry("550x600")
+        
+        ctk.CTkLabel(top, text=f"ผลลัพธ์การแยกความถี่ภาพด้วย Wavelet ({levels} Levels)", font=("Arial", 16, "bold")).pack(pady=10)
+        
+        vis_img.thumbnail((450, 450), Image.LANCZOS)
+        ctk_vis_img = ctk.CTkImage(light_image=vis_img, dark_image=vis_img, size=vis_img.size)
+        
+        lbl = ctk.CTkLabel(top, image=ctk_vis_img, text="")
+        lbl.pack(pady=5, expand=True)
+        
+        desc = ("* มุมซ้ายบน: LL Band (ภาพรวมความถี่ต่ำ)\n"
+                "* ช่องอื่นๆ: LH, HL, HH Bands (เส้นขอบและรายละเอียดความถี่สูง)\n"
+                "* ในทางปฏิบัติ ลายน้ำมักจะฝังใน Middle Frequency (LH, HL)")
+        ctk.CTkLabel(top, text=desc, text_color="gray", justify="left").pack(pady=10)
+
+    # =============================================================
+
     def embed_watermark(self):
         name = self.entry_name.get().strip()
         emp_id = self.entry_emp_id.get().strip()
@@ -124,14 +167,17 @@ class WatermarkApp(ctk.CTk):
             return
 
         try:
-            access_hash = self.generate_mock_hash()
+            image = Image.open(self.embed_file_path).convert("RGBA")
+            width, height = image.size
             
+            # --- เรียกฟังก์ชันแสดงผล DWT (Level 2) ---
+            self.show_dwt_visualization(image, levels=2)
+            # ----------------------------------------
+
+            access_hash = self.generate_mock_hash()
             raw_data = f"Name:{name}|ID:{emp_id}|Hash:{access_hash}"
             encoded_bytes = base64.b64encode(raw_data.encode('utf-8'))
             encoded_str = encoded_bytes.decode('utf-8') 
-
-            image = Image.open(self.embed_file_path).convert("RGBA")
-            width, height = image.size
             
             txt_layer = Image.new("RGBA", image.size, (255, 255, 255, 0))
             draw = ImageDraw.Draw(txt_layer)
@@ -156,7 +202,7 @@ class WatermarkApp(ctk.CTk):
             self.current_metadata = meta_info
 
             self.display_image(self.current_watermarked_img)
-            self.update_info_box(f"✅ ฝังลายน้ำแบบมองไม่เห็นเสร็จสิ้น!\n\nข้อมูลที่ถูกเข้ารหัสฝังลงไป: {encoded_str}\n(ตรวจสอบรูปด้านบน หากถูกต้องให้กดดาวน์โหลด)")
+            self.update_info_box(f"✅ ประมวลผล DWT และฝังลายน้ำเสร็จสิ้น!\n\nข้อมูลที่ถูกเข้ารหัสฝังลงไป: {encoded_str}\n(ตรวจสอบรูปด้านบน หากถูกต้องให้กดดาวน์โหลด)")
             self.btn_save.pack(pady=10) 
 
         except Exception as e:
@@ -189,7 +235,6 @@ class WatermarkApp(ctk.CTk):
                 messagebox.showwarning("ล้มเหลว", "รูปภาพนี้ไม่มีลายน้ำระบบหลักฐาน หรือไม่ใช่ไฟล์ที่ถูกเข้ารหัสไว้")
                 return
 
-            # ถอดรหัส (Decode) ข้อความ
             try:
                 decoded_bytes = base64.b64decode(encoded_str.encode('utf-8'))
                 decoded_str = decoded_bytes.decode('utf-8')
@@ -202,29 +247,17 @@ class WatermarkApp(ctk.CTk):
                 messagebox.showerror("ล้มเหลว", "ข้อมูลถูกบิดเบือน ไม่สามารถถอดรหัสได้")
                 return
 
-            # ==============================================================
-            # 2. ถอดลายน้ำแบบ Destructive (ดึงข้อมูลพิกเซลจนภาพพัง)
-            # ==============================================================
+            # ถอดลายน้ำแบบ Destructive (ดึงข้อมูลพิกเซลจนภาพพัง)
             image_rgb = image.convert("RGB")
-            
-            # แปลงภาพเป็นชุดตัวเลขเพื่อคำนวณทางคณิตศาสตร์ (ใช้ float เพื่อไม่ให้ค่าตันที่ 255 ตอนคูณ)
             img_array = np.array(image_rgb, dtype=np.float32)
-            
-            # เร่งสัญญาณพิกเซลขึ้น 50 เท่า เพื่อจำลองการเค้นหาลายน้ำที่ซ่อนอยู่
-            # ใช้ modulo 255 (% 255) เพื่อให้ค่าสีที่ล้นกรอบวนลูปกลับมา ทำให้สีเพี้ยนแตกทั้งภาพ
             distorted_array = (img_array * 50) % 255
-            
-            # แปลงชุดตัวเลขที่บิดเบี้ยวแล้วกลับเป็นรูปภาพ
             destroyed_image = Image.fromarray(distorted_array.astype(np.uint8))
 
-            # แสดงผล
             self.display_image(destroyed_image)
             extracted_text = f"🚨 [ ข้อมูลหลักฐานถูกเปิดเผย ] 🚨\nเจ้าหน้าที่: {name_part}\nรหัสพนักงาน: {id_part}\nHash: {hash_part}\n\n*สถานะ: รูปหลักฐานเสียหาย (Distorted) จากกระบวนการเร่งสัญญาณเพื่อดึงข้อมูล*"
             self.update_info_box(extracted_text)
             
             self.btn_save.pack_forget()
-
-            # บันทึกรูปที่พังแล้วทับไฟล์เดิมทันทีเพื่อป้องกันการนำไปใช้ต่อ
             destroyed_image.save(self.extract_file_path)
             
             self.extract_file_path = None
