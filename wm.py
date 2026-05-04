@@ -1,11 +1,12 @@
 import customtkinter as ctk
 from tkinter import filedialog, messagebox
 from PIL import Image
+from PIL.PngImagePlugin import PngInfo
 import hashlib
 import os
 import numpy as np
-import base64 
 import pywt
+import qrcode
 
 ctk.set_appearance_mode("Dark")  
 ctk.set_default_color_theme("blue")
@@ -14,91 +15,143 @@ class WatermarkApp(ctk.CTk):
     def __init__(self):
         super().__init__()
 
-        self.title("Evidence Watermarking System (DWT LH-Band Additive)")
-        self.geometry("950x700")
+        self.title("Evidence Watermarking System (QR + Arnold + EXIF)")
+        self.geometry("1100x750")
         self.resizable(False, False)
 
         self.current_watermarked_img = None
+        self.current_png_info = None # สำหรับเก็บ EXIF
         self.embed_file_path = None
         self.extract_file_path = None
         
-        # ตัวแปรสำหรับเก็บค่า Original Image ไว้ใช้ตอนแกะ (Non-blind Extraction)
         self.original_img_for_extraction = None 
-
-        # ค่าขยายสัญญาณ เพื่อไม่ให้ Alpha 0.1-0.9 ถูกปัดเศษทิ้งตอนเซฟเป็น PNG (uint8)
         self.STRENGTH_MULTIPLIER = 50.0 
+        self.ARNOLD_ITERATIONS = 5 # จำนวนรอบในการสลับพิกเซล
 
         self.setup_ui()
 
     def setup_ui(self):
-        self.left_frame = ctk.CTkFrame(self, width=350, corner_radius=10)
+        # ใช้ ScrollableFrame ด้านซ้ายเผื่อช่องกรอกข้อมูลเยอะ
+        self.left_frame = ctk.CTkScrollableFrame(self, width=350, corner_radius=10)
         self.left_frame.pack(side="left", fill="y", padx=20, pady=20)
 
-        self.right_frame = ctk.CTkFrame(self, width=550, corner_radius=10)
+        self.right_frame = ctk.CTkFrame(self, width=650, corner_radius=10)
         self.right_frame.pack(side="right", fill="both", expand=True, padx=(0, 20), pady=20)
 
-        # ================= ส่วนซ้าย =================
-        ctk.CTkLabel(self.left_frame, text="ตั้งค่าข้อมูลหลักฐาน", font=ctk.CTkFont(size=18, weight="bold")).pack(pady=(20, 10))
+        # ================= ส่วนซ้าย (Input) =================
+        ctk.CTkLabel(self.left_frame, text="ตั้งค่าข้อมูลหลักฐาน", font=ctk.CTkFont(size=18, weight="bold")).pack(pady=(10, 10))
 
-        ctk.CTkLabel(self.left_frame, text="ชื่อ-นามสกุล ผู้ฝังหลักฐาน:").pack(anchor="w", padx=20)
-        self.entry_name = ctk.CTkEntry(self.left_frame, width=250)
-        self.entry_name.pack(padx=20, pady=(0, 10))
+        # 1. badge_number
+        ctk.CTkLabel(self.left_frame, text="1. รหัสประจำตัว (Badge Number):").pack(anchor="w", padx=10)
+        self.entry_badge = ctk.CTkEntry(self.left_frame, width=300)
+        self.entry_badge.pack(padx=10, pady=(0, 10))
 
-        ctk.CTkLabel(self.left_frame, text="รหัสพนักงาน:").pack(anchor="w", padx=20)
-        self.entry_emp_id = ctk.CTkEntry(self.left_frame, width=250)
-        self.entry_emp_id.pack(padx=20, pady=(0, 10))
+        # 2. full_name
+        ctk.CTkLabel(self.left_frame, text="2. ชื่อ-นามสกุลจริง:").pack(anchor="w", padx=10)
+        self.entry_fullname = ctk.CTkEntry(self.left_frame, width=300)
+        self.entry_fullname.pack(padx=10, pady=(0, 10))
 
-        # เพิ่ม Slider สำหรับปรับค่า Alpha
-        ctk.CTkLabel(self.left_frame, text="ความแรงลายน้ำ (Alpha 0.1 - 0.9):").pack(anchor="w", padx=20)
+        # 3. Rank
+        ctk.CTkLabel(self.left_frame, text="3. ยศ/ตำแหน่ง (Rank):").pack(anchor="w", padx=10)
+        self.entry_rank = ctk.CTkEntry(self.left_frame, width=300)
+        self.entry_rank.pack(padx=10, pady=(0, 10))
+
+        # 4. Department
+        ctk.CTkLabel(self.left_frame, text="4. หน่วยงาน/สังกัด (Dept):").pack(anchor="w", padx=10)
+        self.entry_dept = ctk.CTkEntry(self.left_frame, width=300)
+        self.entry_dept.pack(padx=10, pady=(0, 10))
+
+        # 5. Role
+        ctk.CTkLabel(self.left_frame, text="5. บทบาท (Role):").pack(anchor="w", padx=10)
+        self.entry_role = ctk.CTkEntry(self.left_frame, width=300)
+        self.entry_role.pack(padx=10, pady=(0, 10))
+
+        # Slider สำหรับปรับค่า Alpha
+        ctk.CTkLabel(self.left_frame, text="ความแรงลายน้ำ (Alpha 0.1 - 0.9):").pack(anchor="w", padx=10)
         self.slider_alpha = ctk.CTkSlider(self.left_frame, from_=0.1, to=0.9, number_of_steps=8)
         self.slider_alpha.set(0.5)
-        self.slider_alpha.pack(padx=20, pady=(0, 20), fill="x")
+        self.slider_alpha.pack(padx=10, pady=(0, 20), fill="x")
 
-        ctk.CTkLabel(self.left_frame, text="--- โหมดฝังลายน้ำ ---", text_color="#28a745").pack(pady=(10, 5))
-        
+        # ปุ่มอัปโหลดและฝัง
+        ctk.CTkLabel(self.left_frame, text="--- โหมดฝังลายน้ำ ---", text_color="#28a745").pack(pady=(5, 5))
         self.btn_select_embed = ctk.CTkButton(self.left_frame, text="📁 เลือกรูปต้นฉบับ", command=self.select_embed_file, fg_color="#555555", hover_color="#333333")
-        self.btn_select_embed.pack(pady=5, padx=20, fill="x")
-        
+        self.btn_select_embed.pack(pady=5, padx=10, fill="x")
         self.lbl_embed_file = ctk.CTkLabel(self.left_frame, text="ยังไม่ได้เลือกรูปภาพ", text_color="gray", font=("Arial", 12))
         self.lbl_embed_file.pack(pady=(0, 10))
+        self.btn_embed = ctk.CTkButton(self.left_frame, text="สลับพิกเซล & ฝัง QR (LH Band)", fg_color="#28a745", hover_color="#218838", command=self.embed_watermark)
+        self.btn_embed.pack(pady=(0, 20), padx=10, fill="x")
 
-        self.btn_embed = ctk.CTkButton(self.left_frame, text="แยก DWT & เริ่มฝังลายน้ำ (LH)", fg_color="#28a745", hover_color="#218838", command=self.embed_watermark)
-        self.btn_embed.pack(pady=(0, 20), padx=20, fill="x")
-
-        ctk.CTkLabel(self.left_frame, text="--- โหมดถอดลายน้ำ ---", text_color="#dc3545").pack(pady=(10, 5))
-        
+        # ปุ่มอัปโหลดและถอด
+        ctk.CTkLabel(self.left_frame, text="--- โหมดถอดลายน้ำ ---", text_color="#dc3545").pack(pady=(5, 5))
         self.btn_select_extract = ctk.CTkButton(self.left_frame, text="📁 เลือกรูปที่มีลายน้ำ", command=self.select_extract_file, fg_color="#555555", hover_color="#333333")
-        self.btn_select_extract.pack(pady=5, padx=20, fill="x")
-        
+        self.btn_select_extract.pack(pady=5, padx=10, fill="x")
         self.lbl_extract_file = ctk.CTkLabel(self.left_frame, text="ยังไม่ได้เลือกรูปภาพ", text_color="gray", font=("Arial", 12))
         self.lbl_extract_file.pack(pady=(0, 10))
+        self.btn_extract = ctk.CTkButton(self.left_frame, text="แกะลายน้ำ & อ่าน EXIF", fg_color="#dc3545", hover_color="#c82333", command=self.extract_watermark)
+        self.btn_extract.pack(pady=5, padx=10, fill="x")
 
-        self.btn_extract = ctk.CTkButton(self.left_frame, text="ถอดลายน้ำจาก LH ย้อนกลับ", fg_color="#dc3545", hover_color="#c82333", command=self.extract_watermark)
-        self.btn_extract.pack(pady=5, padx=20, fill="x")
+        # ================= ส่วนขวา (Preview Area) =================
+        self.tabview = ctk.CTkTabview(self.right_frame, width=600, height=450)
+        self.tabview.pack(pady=10, padx=10, fill="both", expand=True)
 
-        # ================= ส่วนขวา =================
-        self.preview_label = ctk.CTkLabel(self.right_frame, text="พื้นที่แสดงรูปภาพ (Preview)", text_color="gray", width=400, height=350)
-        self.preview_label.pack(pady=(20, 10))
+        self.tab_orig = self.tabview.add("1. ภาพก่อนฝัง")
+        self.tab_qr = self.tabview.add("2. QR ที่นำไปฝัง")
+        self.tab_wm = self.tabview.add("3. ภาพหลังฝัง")
+        self.tab_ext_qr = self.tabview.add("4. QR ที่ถอดได้")
 
-        self.info_textbox = ctk.CTkTextbox(self.right_frame, height=120, width=450)
-        self.info_textbox.pack(pady=10)
-        self.info_textbox.insert("0.0", "ระบบพร้อมทำงาน...")
+        # สร้าง Label รับรูปในแต่ละ Tab
+        self.lbl_img_orig = ctk.CTkLabel(self.tab_orig, text="ยังไม่มีรูปต้นฉบับ")
+        self.lbl_img_orig.pack(expand=True)
+        self.lbl_img_qr = ctk.CTkLabel(self.tab_qr, text="ยังไม่มี QR Code")
+        self.lbl_img_qr.pack(expand=True)
+        self.lbl_img_wm = ctk.CTkLabel(self.tab_wm, text="ยังไม่มีภาพหลักฐาน")
+        self.lbl_img_wm.pack(expand=True)
+        self.lbl_img_ext_qr = ctk.CTkLabel(self.tab_ext_qr, text="ยังไม่มีการถอดลายน้ำ")
+        self.lbl_img_ext_qr.pack(expand=True)
+
+        self.info_textbox = ctk.CTkTextbox(self.right_frame, height=120, width=600)
+        self.info_textbox.pack(pady=10, padx=10)
+        self.info_textbox.insert("0.0", "ระบบพร้อมทำงาน...\n(เมื่อถอดลายน้ำ ข้อมูล EXIF จะแสดงที่นี่)")
         self.info_textbox.configure(state="disabled")
 
-        self.btn_save = ctk.CTkButton(self.right_frame, text="💾 ดาวน์โหลดรูปลงเครื่อง", command=self.save_image)
+        self.btn_save = ctk.CTkButton(self.right_frame, text="💾 บันทึกรูปภาพ + ฝัง EXIF", command=self.save_image)
         self.btn_save.pack(pady=10)
         self.btn_save.pack_forget()
 
-    def generate_mock_hash(self):
-        mock_log = "Access_Log_TimeBased"
-        return hashlib.sha256(mock_log.encode()).hexdigest()[:16]
+    # ================= Arnold Scrambling Methods =================
+    def arnold_transform(self, img_array, iterations):
+        """ สลับพิกเซลเพื่อซ่อนรูปแบบ QR Code ด้วย Arnold Cat Map """
+        N = img_array.shape[0]
+        scrambled = np.zeros_like(img_array)
+        for _ in range(iterations):
+            for y in range(N):
+                for x in range(N):
+                    new_x = (x + y) % N
+                    new_y = (x + 2*y) % N
+                    scrambled[new_y, new_x] = img_array[y, x]
+            img_array = scrambled.copy()
+        return scrambled
 
-    def display_image(self, pil_image):
+    def inverse_arnold_transform(self, img_array, iterations):
+        """ ย้อนกลับพิกเซลที่ถูกสลับ """
+        N = img_array.shape[0]
+        unscrambled = np.zeros_like(img_array)
+        for _ in range(iterations):
+            for y in range(N):
+                for x in range(N):
+                    orig_x = (2*x - y) % N
+                    orig_y = (-x + y) % N
+                    unscrambled[orig_y, orig_x] = img_array[y, x]
+            img_array = unscrambled.copy()
+        return unscrambled
+
+    # ================= UI & Utility Methods =================
+    def display_image_in_tab(self, pil_image, label_widget, max_size=(500, 400)):
         img_copy = pil_image.copy()
-        img_copy.thumbnail((450, 350), Image.LANCZOS)
+        img_copy.thumbnail(max_size, Image.LANCZOS)
         ctk_img = ctk.CTkImage(light_image=img_copy, dark_image=img_copy, size=img_copy.size)
-        self.preview_label.configure(image=ctk_img, text="")
-        self.preview_label.image = ctk_img
+        label_widget.configure(image=ctk_img, text="")
+        label_widget.image = ctk_img
 
     def update_info_box(self, text):
         self.info_textbox.configure(state="normal")
@@ -112,8 +165,9 @@ class WatermarkApp(ctk.CTk):
             self.embed_file_path = path
             filename = os.path.basename(path)
             self.lbl_embed_file.configure(text=filename[:27]+"..." if len(filename)>30 else filename, text_color="white")
-            # เก็บรูปต้นฉบับไว้สำหรับการถอดลายน้ำ (Non-blind)
             self.original_img_for_extraction = Image.open(path).convert("RGB")
+            self.display_image_in_tab(self.original_img_for_extraction, self.lbl_img_orig)
+            self.tabview.set("1. ภาพก่อนฝัง")
 
     def select_extract_file(self):
         path = filedialog.askopenfilename(title="เลือกรูปภาพที่ฝังลายน้ำแล้ว", filetypes=[("PNG Files", "*.png")])
@@ -122,173 +176,125 @@ class WatermarkApp(ctk.CTk):
             filename = os.path.basename(path)
             self.lbl_extract_file.configure(text=filename[:27]+"..." if len(filename)>30 else filename, text_color="white")
 
-    # ================= Core Logic: Data to Binary =================
-    def text_to_binary_array(self, text, shape):
-        """ แปลงข้อความให้เป็น Array ของ 1 และ -1 ให้ขนาดเท่ากับ DWT Band """
-        binary_str = ''.join(format(ord(char), '08b') for char in text)
-        bits = np.array([1 if b == '1' else -1 for b in binary_str], dtype=np.float32)
-        
-        total_pixels = shape[0] * shape[1]
-        if len(bits) < total_pixels:
-            # ถ้าข้อมูลสั้นกว่าขนาดแบนด์ ให้เติม Padding ด้วย -1
-            bits = np.pad(bits, (0, total_pixels - len(bits)), constant_values=-1)
-        else:
-            bits = bits[:total_pixels] # ตัดทิ้งถ้าเกิน
-            
-        return bits.reshape(shape)
-
-    def binary_array_to_text(self, array):
-        """ แปลง Array ของ 1 และ -1 กลับเป็นข้อความ """
-        flat = array.flatten()
-        # ทำ Thresholding: ค่ามากกว่า 0 เป็น 1, น้อยกว่า/เท่ากับ 0 เป็น 0
-        binary_str = ''.join(['1' if val > 0 else '0' for val in flat])
-        
-        chars = []
-        for i in range(0, len(binary_str), 8):
-            byte = binary_str[i:i+8]
-            # หยุดเมื่อเจอ Padding (-1 ล้วน หรือ 00000000)
-            if byte == '00000000' or byte == '11111111' or len(byte) < 8: 
-                break
-            try:
-                chars.append(chr(int(byte, 2)))
-            except:
-                break
-        return ''.join(chars)
-
+    # ================= Embedding Process =================
     def embed_watermark(self):
-        name = self.entry_name.get().strip()
-        emp_id = self.entry_emp_id.get().strip()
+        badge = self.entry_badge.get().strip()
+        fullname = self.entry_fullname.get().strip()
+        rank = self.entry_rank.get().strip()
+        dept = self.entry_dept.get().strip()
+        role = self.entry_role.get().strip()
 
-        if not name or not emp_id:
-            messagebox.showwarning("แจ้งเตือน", "กรุณากรอกข้อมูลให้ครบ")
+        if not badge or not fullname:
+            messagebox.showwarning("แจ้งเตือน", "กรุณากรอกรหัสประจำตัวและชื่อให้ครบถ้วน")
             return
         if not self.embed_file_path:
             messagebox.showwarning("แจ้งเตือน", "กรุณาเลือกรูปภาพต้นฉบับ")
             return
 
         try:
-            # 1. เตรียมรูปภาพ แยก Channel RGB
+            # 1. รวมข้อมูลและทำ Hash
+            raw_data = f"{badge}|{fullname}|{rank}|{dept}|{role}"
+            data_hash = hashlib.sha256(raw_data.encode()).hexdigest()[:16]
+
+            # 2. สร้าง QR Code (ข้อมูลหลักคือ Badge + Hash)
+            qr_payload = f"Badge:{badge}\nHash:{data_hash}"
+            qr = qrcode.make(qr_payload)
+            # บังคับขนาดเป็น 64x64 ตามทฤษฎีที่ระบุ
+            qr_64 = qr.resize((64, 64), Image.NEAREST) 
+            self.display_image_in_tab(qr_64, self.lbl_img_qr)
+
+            # 3. แปลงเป็นอาร์เรย์ (ดำ = 0 -> -1, ขาว = 255 -> 1)
+            qr_arr = np.array(qr_64.convert("L"))
+            W = np.where(qr_arr > 128, 1, -1).astype(np.float32)
+
+            # 4. สลับพิกเซล (Arnold Transform)
+            W_scrambled = self.arnold_transform(W, self.ARNOLD_ITERATIONS)
+
+            # 5. แยก DWT Channel Blue
             image = Image.open(self.embed_file_path).convert("RGB")
             r, g, b = image.split()
-            
-            # ใช้เฉพาะ Channel B (Blue) เพื่อซ่อนให้เนียนที่สุด
             arr_b = np.float32(b) 
-
-            # 2. แยก DWT (Haar Level 1)
             coeffs = pywt.dwt2(arr_b, 'haar')
             LL, (LH, HL, HH) = coeffs
 
-            # 3. เตรียมข้อมูลและสร้าง Binary Watermark
-            access_hash = self.generate_mock_hash()
-            raw_data = f"Name:{name}|ID:{emp_id}|Hash:{access_hash}"
-            
-            W = self.text_to_binary_array(raw_data, LH.shape)
+            # เช็คว่าภาพเล็กไปหรือไม่
+            if LH.shape[0] < 64 or LH.shape[1] < 64:
+                messagebox.showerror("Error", "รูปภาพเล็กเกินไป ต้องมีขนาดอย่างน้อย 128x128 พิกเซล")
+                return
 
-            # 4. สมการการฝัง (Embedding Equation) -> LH' = LH + (alpha * W)
+            # 6. สมการฝัง: ฝังมุมซ้ายบนของ LH-Band (ขนาด 64x64)
             alpha_input = self.slider_alpha.get()
             effective_alpha = alpha_input * self.STRENGTH_MULTIPLIER
-            LH_new = LH + (effective_alpha * W)
+            
+            # คัดลอก LH เดิม เพื่อแก้ไขเฉพาะส่วน 64x64
+            LH_new = np.copy(LH)
+            LH_new[:64, :64] = LH[:64, :64] + (effective_alpha * W_scrambled)
 
-            # 5. ประกอบกลับด้วย Inverse DWT (IDWT)
+            # 7. IDWT คืนค่า
             coeffs_new = (LL, (LH_new, HL, HH))
             watermarked_b_arr = pywt.idwt2(coeffs_new, 'haar')
-            
-            # แปลงกลับเป็นค่าสี 0-255
             watermarked_b_arr = np.clip(watermarked_b_arr, 0, 255).astype(np.uint8)
             b_new = Image.fromarray(watermarked_b_arr, mode='L')
 
-            # รวม RGB กลับเป็นภาพสี
+            # รวมสี
             self.current_watermarked_img = Image.merge("RGB", (r, g, b_new))
+            self.display_image_in_tab(self.current_watermarked_img, self.lbl_img_wm)
 
-            self.display_image(self.current_watermarked_img)
-            self.update_info_box(f"✅ ฝังลายน้ำลงในแบนด์ LH สำเร็จ!\nAlpha (UI): {alpha_input:.2f} | Alpha (คำนวณจริง): {effective_alpha:.2f}\nข้อมูล: {raw_data}")
+            # 8. เตรียมฝังข้อมูลที่เหลือเป็น EXIF (PngInfo)
+            metadata = PngInfo()
+            metadata.add_text("full_name", fullname)
+            metadata.add_text("Rank", rank)
+            metadata.add_text("Department", dept)
+            metadata.add_text("Role", role)
+            self.current_png_info = metadata
+
+            self.update_info_box(f"✅ ฝังสำเร็จ! (Arnold รอบ: {self.ARNOLD_ITERATIONS})\nEXIF Data Prepared: Name={fullname}, Dept={dept}\nไปที่แท็บ '3. ภาพหลังฝัง' เพื่อดูรูปหลักฐาน")
+            self.tabview.set("3. ภาพหลังฝัง")
             self.btn_save.pack(pady=10) 
 
         except Exception as e:
             messagebox.showerror("ข้อผิดพลาด", str(e))
 
     def save_image(self):
-        if self.current_watermarked_img:
+        if self.current_watermarked_img and self.current_png_info:
             file_path = filedialog.asksaveasfilename(
                 defaultextension=".png",
                 filetypes=[("PNG Files", "*.png")],
                 title="บันทึกรูปภาพหลักฐาน"
             )
             if file_path:
-                self.current_watermarked_img.save(file_path, "PNG")
-                messagebox.showinfo("สำเร็จ", "บันทึกรูปภาพเรียบร้อยแล้ว!")
+                # เซฟรูปลงเครื่องพร้อมฝัง EXIF (PngInfo Header)
+                self.current_watermarked_img.save(file_path, "PNG", pnginfo=self.current_png_info)
+                messagebox.showinfo("สำเร็จ", "บันทึกรูปภาพพร้อมฝัง EXIF เรียบร้อยแล้ว!")
                 self.btn_save.pack_forget()
 
-    # ================= ฟังก์ชันใหม่: แสดงหน้าต่างเปรียบเทียบผลลัพธ์ =================
-    def show_extraction_report(self, wm_img, orig_img, W_extracted):
-        top = ctk.CTkToplevel(self)
-        top.title("รายงานวิเคราะห์การถอดลายน้ำ (Extraction Analysis)")
-        top.geometry("900x400")
-        top.resizable(False, False)
-
-        # สร้าง Frame จัด Layout 3 ช่อง
-        frame_imgs = ctk.CTkFrame(top, fg_color="transparent")
-        frame_imgs.pack(pady=20, fill="x")
-
-        # ---------------- ช่องที่ 1: ภาพหลักฐาน ----------------
-        frame1 = ctk.CTkFrame(frame_imgs, fg_color="transparent")
-        frame1.pack(side="left", expand=True)
-        ctk.CTkLabel(frame1, text="1. ภาพหลักฐาน (มองด้วยตาเปล่า)", font=("Arial", 14, "bold")).pack(pady=(0, 10))
-        
-        img1 = wm_img.copy()
-        img1.thumbnail((250, 250), Image.LANCZOS)
-        ctk_img1 = ctk.CTkImage(light_image=img1, dark_image=img1, size=img1.size)
-        ctk.CTkLabel(frame1, image=ctk_img1, text="").pack()
-
-        # ---------------- ช่องที่ 2: รูปร่างของลายน้ำ Binary ----------------
-        frame2 = ctk.CTkFrame(frame_imgs, fg_color="transparent")
-        frame2.pack(side="left", expand=True)
-        ctk.CTkLabel(frame2, text="2. ลายน้ำที่ดึงได้จากแบนด์ LH", font=("Arial", 14, "bold"), text_color="#28a745").pack(pady=(0, 10))
-        
-        # แปลง Array ของ Watermark (1, -1) ให้เป็นภาพขาวดำ (255, 0)
-        wm_pattern_array = np.where(W_extracted > 0, 255, 0).astype(np.uint8)
-        wm_pattern_img = Image.fromarray(wm_pattern_array, mode='L')
-        
-        # ขยายภาพให้เห็นชัดๆ (เพราะขนาดมันเท่ากับแค่ครึ่งนึงของภาพจริงตามหลัก DWT Level 1)
-        wm_pattern_img = wm_pattern_img.resize((250, 250), Image.NEAREST) 
-        ctk_img2 = ctk.CTkImage(light_image=wm_pattern_img, dark_image=wm_pattern_img, size=wm_pattern_img.size)
-        ctk.CTkLabel(frame2, image=ctk_img2, text="").pack()
-
-        # ---------------- ช่องที่ 3: ภาพแสดงส่วนต่าง (Difference Map) ----------------
-        frame3 = ctk.CTkFrame(frame_imgs, fg_color="transparent")
-        frame3.pack(side="left", expand=True)
-        ctk.CTkLabel(frame3, text="3. จุดที่พิกเซลถูกเปลี่ยน (Diff Map)", font=("Arial", 14, "bold"), text_color="#ffc107").pack(pady=(0, 10))
-        
-        # นำภาพมาลบกันเพื่อหาความต่าง และคูณเร่งสัญญาณให้สว่างขึ้นเพื่อให้ตาเปล่ามองเห็น
-        arr_wm = np.array(wm_img, dtype=np.int16)
-        arr_orig = np.array(orig_img, dtype=np.int16)
-        diff_array = np.abs(arr_wm - arr_orig)
-        
-        diff_amplified = np.clip(diff_array * 15, 0, 255).astype(np.uint8) # เร่งแสง 15 เท่า
-        diff_img = Image.fromarray(diff_amplified, mode='RGB')
-        
-        diff_img.thumbnail((250, 250), Image.LANCZOS)
-        ctk_img3 = ctk.CTkImage(light_image=diff_img, dark_image=diff_img, size=diff_img.size)
-        ctk.CTkLabel(frame3, image=ctk_img3, text="").pack()
-
-    # ================= ฟังก์ชันถอดลายน้ำที่ถูกอัปเดตแล้ว =================
+    # ================= Extraction Process =================
     def extract_watermark(self):
         if not self.extract_file_path:
-            messagebox.showwarning("แจ้งเตือน", "กรุณาเลือกรูปลายน้ำ")
+            messagebox.showwarning("แจ้งเตือน", "กรุณาเลือกรูปภาพที่ต้องการถอดลายน้ำ")
             return
         if not self.original_img_for_extraction:
-            messagebox.showerror("ข้อมูลไม่ครบ", "การถอดลายน้ำแบบ Additive ต้องใช้ Original Image เป็นฐาน\n(ในหน้าทดสอบนี้ กรุณาอัปโหลดรูปต้นฉบับในช่อง 'ฝังลายน้ำ' ค้างไว้ด้วย)")
+            messagebox.showerror("ข้อมูลไม่ครบ", "ระบบต้องการ Original Image (รูปต้นฉบับ) เพื่อเปรียบเทียบ\nกรุณาอัปโหลดรูปต้นฉบับที่ช่องฝังลายน้ำทิ้งไว้")
             return
 
         try:
-            wm_img = Image.open(self.extract_file_path).convert("RGB")
+            wm_img = Image.open(self.extract_file_path) # โหลดรูป PNG
             orig_img = self.original_img_for_extraction
             
-            if wm_img.size != orig_img.size:
+            # ดึง EXIF (Header Metadata) จาก PNG
+            img_info = wm_img.info
+            ext_fullname = img_info.get("full_name", "N/A")
+            ext_rank = img_info.get("Rank", "N/A")
+            ext_dept = img_info.get("Department", "N/A")
+            ext_role = img_info.get("Role", "N/A")
+
+            wm_img_rgb = wm_img.convert("RGB")
+            
+            if wm_img_rgb.size != orig_img.size:
                 messagebox.showerror("ล้มเหลว", "ขนาดภาพที่นำมาตรวจสอบ ไม่เท่ากับภาพต้นฉบับ")
                 return
 
-            _, _, b_wm = wm_img.split()
+            _, _, b_wm = wm_img_rgb.split()
             _, _, b_orig = orig_img.split()
 
             coeffs_wm = pywt.dwt2(np.float32(b_wm), 'haar')
@@ -300,19 +306,37 @@ class WatermarkApp(ctk.CTk):
             alpha_input = self.slider_alpha.get()
             effective_alpha = alpha_input * self.STRENGTH_MULTIPLIER
             
-            W_extracted = (LH_wm - LH_orig) / effective_alpha
+            # 1. ดึงข้อมูลพิกเซลจากการลบ LH_wm - LH_orig
+            W_ext_scrambled = (LH_wm[:64, :64] - LH_orig[:64, :64]) / effective_alpha
 
-            decoded_str = self.binary_array_to_text(W_extracted)
+            # 2. Thresholding: มากกว่า 0 ให้เป็น 1 (ขาว), น้อยกว่าเท่ากับ 0 เป็น -1 (ดำ)
+            # ตามเอกสาร: แปลง 1 เป็น 255 (สีขาว), 0 เป็น 0 (สีดำ)
+            W_ext_binary = np.where(W_ext_scrambled > 0, 1, -1)
 
-            if "Name:" in decoded_str and "|ID:" in decoded_str:
-                self.display_image(wm_img)
-                self.update_info_box(f"🔍 [ ถอดลายน้ำสำเร็จ ] 🔍\n{decoded_str}")
-                
-                # --- เรียกใช้งานหน้าต่างเปรียบเทียบที่นี่ ---
-                self.show_extraction_report(wm_img, orig_img, W_extracted)
-                
-            else:
-                self.update_info_box("❌ ไม่สามารถถอดลายน้ำได้ หรือรูปภาพมีการถูกดัดแปลงเกินไป\n(อาจจะเกิดจากตั้งค่า Alpha ต่ำเกินไป ทำให้ข้อมูลสูญหายตอนเซฟไฟล์)")
+            # 3. ถอดรหัส Arnold Inverse เพื่อจัดเรียงพิกเซลกลับที่เดิม
+            W_extracted = self.inverse_arnold_transform(W_ext_binary, self.ARNOLD_ITERATIONS)
+
+            # 4. แปลงเป็นรูปภาพ ขาว-ดำ
+            wm_pattern_array = np.where(W_extracted > 0, 255, 0).astype(np.uint8)
+            ext_qr_img = Image.fromarray(wm_pattern_array, mode='L')
+            
+            self.display_image_in_tab(ext_qr_img, self.lbl_img_ext_qr)
+            self.tabview.set("4. QR ที่ถอดได้")
+
+            # แสดงผล EXIF ใน Textbox
+            report = (
+                "🔍 [ ถอดลายน้ำสำเร็จ ] 🔍\n"
+                "----------------------------------------\n"
+                "📌 ข้อมูล Header (EXIF / PngInfo):\n"
+                f"   - Full Name : {ext_fullname}\n"
+                f"   - Rank      : {ext_rank}\n"
+                f"   - Dept      : {ext_dept}\n"
+                f"   - Role      : {ext_role}\n\n"
+                "📌 ข้อมูลในลายน้ำ (QR Code):\n"
+                "   -> สแกนรูป QR ที่แท็บที่ 4 เพื่อดู Badge Number และ Hash\n"
+                "----------------------------------------"
+            )
+            self.update_info_box(report)
 
             self.extract_file_path = None
             self.lbl_extract_file.configure(text="ยังไม่ได้เลือกรูปภาพ", text_color="gray")
